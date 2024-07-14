@@ -1,0 +1,37 @@
+DAG
+
+ 
+
+中文名有向无环图。它不是spark独有技术。它是一种编程思想 ，甚至于hadoop阵营里也有运用DAG的技术，比如Tez，Oozie。有意思的是，Tez是从MapReduce的基础上深化而来的分布式计算框架。其核心思想是将Map和Reduce两个阶段分成更多的函数，各个函数之间可自由组合，形成DAG dependencies链，延迟计算。可见DAG思想适合多阶段的分布式计算，如果是MapReduce，Map本身就是InputStream,Reduce本身就是OutputStream，根本就不需要dependencies了。如果使用DAG思想反而得不偿失。
+
+spark的算子分为两大类。一类是Transformation,一类是action。Transformation会在逻辑上将batch时间内的RDD形成一个DAG，然后在action触发后,在物理上通过dependencies回溯进行RDD的计算。
+
+那么从RDD到DAG是怎样生成的呢？
+
+ 
+
+DStream
+
+ 
+
+
+RDD首先第一步要先变成DStream。
+
+一个spark streaming程序首先要从数据源讲起，这里以kafka作为数据为例，通过以下代码可以得到一个InputDStream。
+
+val inputDStream = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder, (String, String)](ssc, kafkaParams, fromOffsets, messageHandler)
+这是Driect的方式，也可以通过Reciver的方式得到ReceiverInputDStream,但是它本身也是继承自InputDStream。
+
+val receiverInputDStream = KafkaUtils.createStream(ssc, kafkaParams, topics, storageLevel)
+
+abstract class ReceiverInputDStream[T: ClassTag](_ssc: StreamingContext)
+  extends InputDStream[T](_ssc)
+通过源码可以看到InputDStream继承自DStream。
+
+abstract class InputDStream[T: ClassTag](_ssc: StreamingContext)
+  extends DStream[T](_ssc)
+由此RDD变成了DStream。下面我们来仔细研究一下DStream究竟是个什么样子呢。
+
+ 我们知道一个spark streaming处理逻辑包括接收数据(InputStream)，处理数据(transformation和action),输出结果(OutputStream)。前面从RDD到DStream部份实际上就是接收数据部分。那么从DStream的角度来看看数据处理的部份。
+
+从源码可以看到每个transformation算子都有对应的DStream实现类。比如map->MappedDStream,flatMap->FlatMappedDStream,filter->FilteredDStream。
