@@ -1,0 +1,75 @@
+DStream
+
+ 
+
+
+RDD首先第一步要先变成DStream。
+
+一个spark streaming程序首先要从数据源讲起，这里以kafka作为数据为例，通过以下代码可以得到一个InputDStream。
+
+val inputDStream = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder, (String, String)](ssc, kafkaParams, fromOffsets, messageHandler)
+这是Driect的方式，也可以通过Reciver的方式得到ReceiverInputDStream,但是它本身也是继承自InputDStream。
+
+val receiverInputDStream = KafkaUtils.createStream(ssc, kafkaParams, topics, storageLevel)
+
+abstract class ReceiverInputDStream[T: ClassTag](_ssc: StreamingContext)
+  extends InputDStream[T](_ssc)
+通过源码可以看到InputDStream继承自DStream。
+
+abstract class InputDStream[T: ClassTag](_ssc: StreamingContext)
+  extends DStream[T](_ssc)
+由此RDD变成了DStream。下面我们来仔细研究一下DStream究竟是个什么样子呢。
+
+ 我们知道一个spark streaming处理逻辑包括接收数据(InputStream)，处理数据(transformation和action),输出结果(OutputStream)。前面从RDD到DStream部份实际上就是接收数据部分。那么从DStream的角度来看看数据处理的部份。
+
+从源码可以看到每个transformation算子都有对应的DStream实现类。比如map->MappedDStream,flatMap->FlatMappedDStream,filter->FilteredDStream。
+
+复制代码
+  // =======================================================================
+  // DStream operations
+  // =======================================================================
+
+  /** Return a new DStream by applying a function to all elements of this DStream. */
+  def map[U: ClassTag](mapFunc: T => U): DStream[U] = ssc.withScope {
+    new MappedDStream(this, context.sparkContext.clean(mapFunc))
+  }
+
+  /**
+   * Return a new DStream by applying a function to all elements of this DStream,
+   * and then flattening the results
+   */
+  def flatMap[U: ClassTag](flatMapFunc: T => TraversableOnce[U]): DStream[U] = ssc.withScope {
+    new FlatMappedDStream(this, context.sparkContext.clean(flatMapFunc))
+  }
+
+  /** Return a new DStream containing only the elements that satisfy a predicate. */
+  def filter(filterFunc: T => Boolean): DStream[T] = ssc.withScope {
+    new FilteredDStream(this, context.sparkContext.clean(filterFunc))
+  }
+复制代码
+我们以FilteredDStream为例，看看源码。可以看到两个关键属性:parent和dependencies。parent是一个DStream,而dependencies是一个DStream的集合。parent相当于指针，指向当前DStream的父级DStream,从而形成DAG图的一环。而dependencies则是当前DStream之前的所有DStream的集合。parent相当于在逻辑上表明各个DStream的关系，dependencies相当于在物理上表明整个DAG图的所有RDD集合，以便回溯计算。
+
+复制代码
+package org.apache.spark.streaming.dstream
+
+import scala.reflect.ClassTag
+
+import org.apache.spark.rdd.RDD
+import org.apache.spark.streaming.{Duration, Time}
+
+private[streaming]
+class FilteredDStream[T: ClassTag](
+    parent: DStream[T],
+    filterFunc: T => Boolean
+  ) extends DStream[T](parent.ssc) {
+
+  override def dependencies: List[DStream[_]] = List(parent)
+
+  override def slideDuration: Duration = parent.slideDuration
+
+  override def compute(validTime: Time): Option[RDD[T]] = {
+    parent.getOrCompute(validTime).map(_.filter(filterFunc))
+  }
+}
+复制代码
+ 前面是transformation算子所形成的DStream,那么action算子所形成的DStream呢。事实上所有的action最终都只会形成ForEachDstream,因为不管是foreachRDD还是print还是saveAsObjectFiles，通过查看源码，会发现最终调用的还是foreachRDD。所以我们以我们以foreachRDD为例。
